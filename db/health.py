@@ -4,8 +4,11 @@ import os
 
 import psycopg
 
+from db.config import load_project_env
+
 
 def check_database() -> dict:
+    load_project_env()
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         return {"ok": False, "message": "DATABASE_URL is not set"}

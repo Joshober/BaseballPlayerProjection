@@ -41,14 +41,147 @@ def _prepare_payload_row(row: pd.Series) -> dict[str, Any]:
     return payload
 
 
-def build_features_dataframe(conn: psycopg.Connection, feature_version: str = "v1") -> pd.DataFrame:
-    players = _fetch_df(
-        conn,
-        """
-        SELECT id AS player_id, position, reached_mlb, years_to_mlb, is_active
-        FROM players
-        """,
-    )
+def _peak_milb_tier(level_order: int) -> int:
+    """Map DB level_order (1=Rk … 6=AAA) to Rk=1 … AAA=5 style score."""
+    if level_order <= 1:
+        return 1
+    if level_order <= 3:
+        return 2
+    if level_order == 4:
+        return 3
+    if level_order == 5:
+        return 4
+    return 5
+
+
+def _cohort_mean_age(
+    batting: pd.DataFrame,
+    pitching: pd.DataFrame,
+    player_ids: set[int] | None,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for df in (batting, pitching):
+        if df.empty:
+            continue
+        sub = df
+        if player_ids is not None:
+            sub = sub[sub["player_id"].isin(player_ids)]
+        for _, r in sub.iterrows():
+            if pd.isna(r.get("age")) or pd.isna(r.get("season")) or pd.isna(r.get("level_order")):
+                continue
+            rows.append(
+                {
+                    "season": int(r["season"]),
+                    "level_order": int(r["level_order"]),
+                    "age": float(r["age"]),
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["season", "level_order", "mean_age"])
+    c = pd.DataFrame(rows)
+    return c.groupby(["season", "level_order"], as_index=False)["age"].mean().rename(columns={"age": "mean_age"})
+
+
+def _weighted_age_vs_cohort(
+    frame: pd.DataFrame,
+    cohort: pd.DataFrame,
+    weight_col: str,
+) -> float | None:
+    if frame.empty or cohort.empty or weight_col not in frame.columns:
+        return None
+    m = frame.merge(cohort, on=["season", "level_order"], how="left")
+    m["mean_age"] = m["mean_age"].fillna(m["age"])
+    m["diff"] = m["age"] - m["mean_age"]
+    w = m[weight_col].fillna(0).astype(float)
+    if w.sum() <= 0:
+        return None
+    return float((m["diff"] * w).sum() / w.sum())
+
+
+def _ever_repeated_level(lvl: pd.DataFrame) -> bool:
+    if lvl.empty:
+        return False
+    for lo in lvl["level_order"].dropna().unique():
+        sub = lvl[lvl["level_order"] == lo]
+        if sub["season"].nunique() > 1:
+            return True
+    return False
+
+
+def _ops_yoy_delta_and_improve(b: pd.DataFrame) -> tuple[float | None, bool]:
+    if b.empty or b["season"].nunique() < 2:
+        return None, False
+    seasons = sorted(b["season"].dropna().unique())
+    ops_by_season: list[tuple[int, float]] = []
+    for sea in seasons:
+        grp = b[b["season"] == sea]
+        pa = float(grp["pa"].fillna(0).sum())
+        if pa <= 0:
+            continue
+        wops = float((grp["ops"].fillna(0) * grp["pa"].fillna(0)).sum() / pa)
+        ops_by_season.append((int(sea), wops))
+    if len(ops_by_season) < 2:
+        return None, False
+    last, prev = ops_by_season[-1][1], ops_by_season[-2][1]
+    delta = last - prev
+    return delta, delta > 0
+
+
+def _kbb_yoy_delta_and_improve(pit: pd.DataFrame) -> tuple[float | None, bool]:
+    if pit.empty or pit["season"].nunique() < 2 or "k_minus_bb" not in pit.columns:
+        return None, False
+    seasons = sorted(pit["season"].dropna().unique())
+    vals: list[tuple[int, float]] = []
+    for sea in seasons:
+        grp = pit[pit["season"] == sea]
+        bf = grp["ip"].fillna(0).sum()  # proxy weight if BF missing
+        if bf <= 0:
+            continue
+        w = float((grp["k_minus_bb"].fillna(0) * grp["ip"].fillna(0)).sum() / bf)
+        vals.append((int(sea), w))
+    if len(vals) < 2:
+        return None, False
+    last, prev = vals[-1][1], vals[-2][1]
+    delta = last - prev
+    return delta, delta > 0
+
+
+def _low_sample_flag(b: pd.DataFrame, pit: pd.DataFrame, position_group: str) -> bool:
+    if position_group in ("sp", "rp"):
+        if pit.empty:
+            return True
+        mx = float(pit.groupby("season")["ip"].sum().max())
+        return mx < 60.0
+    if b.empty:
+        return True
+    mx = float(b.groupby("season")["pa"].sum().max())
+    return mx < 200.0
+
+
+def build_features_dataframe(
+    conn: psycopg.Connection,
+    feature_version: str = "v1",
+    cohort_player_ids: set[int] | None = None,
+) -> pd.DataFrame:
+    try:
+        players = _fetch_df(
+            conn,
+            """
+            SELECT id AS player_id, position, reached_mlb, years_to_mlb, is_active,
+                   draft_round, draft_year, is_international, signing_bonus_usd, eligible_for_training
+            FROM players
+            """,
+        )
+    except Exception:
+        players = _fetch_df(
+            conn,
+            """
+            SELECT id AS player_id, position, reached_mlb, years_to_mlb, is_active
+            FROM players
+            """,
+        )
+        for c in ("draft_round", "draft_year", "is_international", "signing_bonus_usd", "eligible_for_training"):
+            players[c] = None
     if players.empty:
         return pd.DataFrame()
 
@@ -71,6 +204,8 @@ def build_features_dataframe(conn: psycopg.Connection, feature_version: str = "v
     mlb_bat = _fetch_df(conn, "SELECT player_id, war FROM mlb_batting")
     mlb_pit = _fetch_df(conn, "SELECT player_id, war FROM mlb_pitching")
     salary = _fetch_df(conn, "SELECT player_id, salary_usd FROM salary_history")
+
+    cohort = _cohort_mean_age(batting, pitching, cohort_player_ids)
 
     out_rows: list[dict[str, Any]] = []
 
@@ -176,44 +311,111 @@ def build_features_dataframe(conn: psycopg.Connection, feature_version: str = "v
             else:
                 position_group = "rp"
 
-        out_rows.append(
-            {
-                "player_id": player_id,
-                "feature_version": feature_version,
-                "position_group": position_group,
-                "peak_level": peak_level,
-                "peak_level_order": peak_level_order,
-                "seasons_in_minors": seasons_in_minors,
-                "age_at_pro_debut": age_at_pro_debut,
-                "age_at_peak_level": age_at_peak_level,
-                "career_milb_pa": career_milb_pa,
-                "best_season_ops": best_season_ops,
-                "best_season_ops_level_adj": best_season_ops_level_adj,
-                "career_milb_iso": career_milb_iso,
-                "career_milb_bb_pct": career_milb_bb_pct,
-                "career_milb_k_pct": career_milb_k_pct,
-                "ops_trajectory": ops_trajectory,
-                "ops_aaa": ops_aaa,
-                "pa_at_aa_plus": pa_at_aa_plus,
-                "age_adj_ops_peak": age_adj_ops_peak,
-                "career_milb_ip": career_milb_ip,
-                "best_season_era": best_season_era,
-                "best_season_era_level_adj": best_season_era_level_adj,
-                "career_milb_k9": career_milb_k9,
-                "career_milb_bb9": career_milb_bb9,
-                "career_milb_k_minus_bb": career_milb_k_minus_bb,
-                "career_milb_whip": career_milb_whip,
-                "era_trajectory": era_trajectory,
-                "era_aaa": era_aaa,
-                "ip_at_aa_plus": ip_at_aa_plus,
-                "label_reached_mlb": bool(p["reached_mlb"]) if p["reached_mlb"] is not None else None,
-                "label_years_to_mlb": float(p["years_to_mlb"]) if p["years_to_mlb"] is not None else None,
-                "label_censored": (not bool(p["reached_mlb"])) and bool(p["is_active"]),
-                "label_career_war": player_mlb_war,
-                "label_peak_salary_usd": label_peak_salary_usd,
-                "label_career_earnings_usd": label_career_earnings_usd,
-            }
-        )
+        first_milb = int(lvl["season"].min()) if not lvl.empty and lvl["season"].notna().any() else None
+        v2_on = feature_version == "v2"
+        career_age_vs = None
+        ev_rep = None
+        promo_speed = None
+        ops_yoy = None
+        kbb_yoy = None
+        improving = None
+        low_samp = None
+        dr_f = None
+        intl_f = None
+        bonus_f = None
+
+        def _row_val(key: str):
+            if key not in p.index:
+                return None
+            v = p[key]
+            if pd.isna(v):
+                return None
+            return v
+
+        elig_raw = _row_val("eligible_for_training")
+        elig_bool = bool(elig_raw) if elig_raw is not None else None
+
+        if v2_on:
+            av_b = _weighted_age_vs_cohort(b, cohort, "pa") if not b.empty else None
+            av_p = _weighted_age_vs_cohort(pit, cohort, "ip") if not pit.empty else None
+            if position_group == "bat" and av_b is not None:
+                career_age_vs = av_b
+            elif position_group in ("sp", "rp") and av_p is not None:
+                career_age_vs = av_p
+            elif av_b is not None:
+                career_age_vs = av_b
+            elif av_p is not None:
+                career_age_vs = av_p
+            ev_rep = _ever_repeated_level(lvl)
+            n_sea = int(lvl["season"].nunique()) if not lvl.empty else 1
+            pk_ord = peak_level_order or 1
+            promo_speed = float(_peak_milb_tier(pk_ord) / max(n_sea, 1))
+            ops_yoy, imp_o = _ops_yoy_delta_and_improve(b)
+            kbb_yoy, imp_k = _kbb_yoy_delta_and_improve(pit)
+            improving = bool(imp_o or imp_k)
+            low_samp = _low_sample_flag(b, pit, position_group)
+            dr_raw = _row_val("draft_round")
+            try:
+                dr_f = int(dr_raw) if dr_raw is not None else None
+            except (TypeError, ValueError):
+                dr_f = None
+            intl_raw = _row_val("is_international")
+            intl_f = bool(intl_raw) if intl_raw is not None else None
+            bonus_raw = _row_val("signing_bonus_usd")
+            try:
+                bonus_f = int(bonus_raw) if bonus_raw is not None else None
+            except (TypeError, ValueError):
+                bonus_f = None
+
+        row_base: dict[str, Any] = {
+            "player_id": player_id,
+            "feature_version": feature_version,
+            "position_group": position_group,
+            "peak_level": peak_level,
+            "peak_level_order": peak_level_order,
+            "seasons_in_minors": seasons_in_minors,
+            "age_at_pro_debut": age_at_pro_debut,
+            "age_at_peak_level": age_at_peak_level,
+            "career_milb_pa": career_milb_pa,
+            "best_season_ops": best_season_ops,
+            "best_season_ops_level_adj": best_season_ops_level_adj,
+            "career_milb_iso": career_milb_iso,
+            "career_milb_bb_pct": career_milb_bb_pct,
+            "career_milb_k_pct": career_milb_k_pct,
+            "ops_trajectory": ops_trajectory,
+            "ops_aaa": ops_aaa,
+            "pa_at_aa_plus": pa_at_aa_plus,
+            "age_adj_ops_peak": age_adj_ops_peak,
+            "career_milb_ip": career_milb_ip,
+            "best_season_era": best_season_era,
+            "best_season_era_level_adj": best_season_era_level_adj,
+            "career_milb_k9": career_milb_k9,
+            "career_milb_bb9": career_milb_bb9,
+            "career_milb_k_minus_bb": career_milb_k_minus_bb,
+            "career_milb_whip": career_milb_whip,
+            "era_trajectory": era_trajectory,
+            "era_aaa": era_aaa,
+            "ip_at_aa_plus": ip_at_aa_plus,
+            "label_reached_mlb": bool(p["reached_mlb"]) if p["reached_mlb"] is not None else None,
+            "label_years_to_mlb": float(p["years_to_mlb"]) if p["years_to_mlb"] is not None else None,
+            "label_censored": (not bool(p["reached_mlb"])) and bool(p["is_active"]),
+            "label_career_war": player_mlb_war,
+            "label_peak_salary_usd": label_peak_salary_usd,
+            "label_career_earnings_usd": label_career_earnings_usd,
+            "first_milb_season": first_milb if v2_on else None,
+            "career_age_vs_level_avg": career_age_vs,
+            "ever_repeated_level": ev_rep,
+            "promotion_speed_score": promo_speed,
+            "ops_yoy_delta": ops_yoy,
+            "k_minus_bb_yoy_delta": kbb_yoy,
+            "is_improving": improving,
+            "low_sample_season_flag": low_samp,
+            "draft_round_feat": dr_f,
+            "is_international_feat": intl_f,
+            "signing_bonus_usd_feat": bonus_f,
+            "label_eligible_for_training": elig_bool,
+        }
+        out_rows.append(row_base)
 
     return pd.DataFrame(out_rows)
 
@@ -257,6 +459,18 @@ def upsert_engineered_features(conn: psycopg.Connection, frame: pd.DataFrame) ->
         "label_career_war",
         "label_peak_salary_usd",
         "label_career_earnings_usd",
+        "first_milb_season",
+        "career_age_vs_level_avg",
+        "ever_repeated_level",
+        "promotion_speed_score",
+        "ops_yoy_delta",
+        "k_minus_bb_yoy_delta",
+        "is_improving",
+        "low_sample_season_flag",
+        "draft_round_feat",
+        "is_international_feat",
+        "signing_bonus_usd_feat",
+        "label_eligible_for_training",
     ]
     set_cols = [c for c in cols if c not in ("player_id", "feature_version")]
     updates = ", ".join([f"{c}=EXCLUDED.{c}" for c in set_cols] + ["computed_at=NOW()"])
@@ -275,8 +489,16 @@ def upsert_engineered_features(conn: psycopg.Connection, frame: pd.DataFrame) ->
     return len(payload)
 
 
-def build_and_upsert_features(database_url: str, feature_version: str = "v1") -> FeatureBuildResult:
+def build_and_upsert_features(
+    database_url: str,
+    feature_version: str = "v1",
+    cohort_player_ids: set[int] | None = None,
+) -> FeatureBuildResult:
     with psycopg.connect(database_url) as conn:
-        frame = build_features_dataframe(conn, feature_version=feature_version)
+        frame = build_features_dataframe(
+            conn,
+            feature_version=feature_version,
+            cohort_player_ids=cohort_player_ids,
+        )
         upserted = upsert_engineered_features(conn, frame)
     return FeatureBuildResult(feature_version=feature_version, built_rows=len(frame), upserted_rows=upserted)

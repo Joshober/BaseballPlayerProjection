@@ -9,4 +9,5 @@ def load_project_env() -> None:
     """Load environment variables from project .env if present."""
     root = Path(__file__).resolve().parents[1]
     env_path = root / ".env"
-    load_dotenv(dotenv_path=env_path, override=False)
+    # Local `.env` should win over inherited shell/IDE env (e.g. stale DATABASE_URL).
+    load_dotenv(dotenv_path=env_path, override=True)

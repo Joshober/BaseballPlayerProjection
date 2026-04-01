@@ -25,8 +25,14 @@ CREATE TABLE IF NOT EXISTS players (
     milb_debut_date     DATE,
     mlb_debut_date      DATE,                           -- NULL if never reached MLB
     reached_mlb         BOOLEAN      NOT NULL DEFAULT FALSE,
-    years_to_mlb        NUMERIC(4,2),                   -- fractional years from MiLB debut → MLB debut; NULL if never reached
+    years_to_mlb        NUMERIC(4,2),                   -- debut year minus first MiLB season year (see backfill); NULL if never reached
     is_active           BOOLEAN      NOT NULL DEFAULT TRUE,
+    draft_round         SMALLINT,                        -- MLB draft round; NULL = undrafted / int'l
+    draft_year          SMALLINT,
+    is_international    BOOLEAN,                         -- true if signed as international amateur
+    signing_bonus_usd   BIGINT,                          -- from MLB bio when available
+    eligible_for_training BOOLEAN,                       -- false = active under 28 with no MLB debut (unresolved)
+    years_to_mlb_fractional NUMERIC(4,2),              -- fractional years MiLB→MLB (parallel to integer years_to_mlb)
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
@@ -274,6 +280,20 @@ CREATE TABLE IF NOT EXISTS engineered_features (
     label_peak_salary_usd       BIGINT,
     label_career_earnings_usd   BIGINT,
 
+    -- v2: cohort age, progression, durability, draft snapshot
+    first_milb_season           SMALLINT,
+    career_age_vs_level_avg     NUMERIC(6,3),            -- PA/IP-weighted mean (age - league avg age at level)
+    ever_repeated_level         BOOLEAN,
+    promotion_speed_score       NUMERIC(8,4),            -- tier score / seasons in system
+    ops_yoy_delta               NUMERIC(7,4),
+    k_minus_bb_yoy_delta        NUMERIC(7,4),
+    is_improving                BOOLEAN,
+    low_sample_season_flag      BOOLEAN,                 -- noisy career (e.g. max season PA < 200 as batter)
+    draft_round_feat            SMALLINT,
+    is_international_feat       BOOLEAN,
+    signing_bonus_usd_feat      BIGINT,
+    label_eligible_for_training BOOLEAN,
+
     UNIQUE (player_id, feature_version)
 );
 
@@ -352,8 +372,9 @@ CREATE TABLE IF NOT EXISTS predictions (
 
 CREATE INDEX IF NOT EXISTS idx_predictions_player  ON predictions(player_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_version ON predictions(model_version);
+-- Use UTC date so the index expression is immutable (plain ::date on timestamptz is not).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_predictions_player_model_day
-    ON predictions(player_id, model_version, (predicted_at::DATE));
+    ON predictions (player_id, model_version, ((predicted_at AT TIME ZONE 'UTC')::date));
 
 
 -- -----------------------------------------------------------------------------

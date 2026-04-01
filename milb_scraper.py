@@ -25,6 +25,7 @@ from pathlib import Path
 import re
 import time
 import random
+from urllib.parse import quote_plus, urljoin, unquote
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup, Comment
@@ -134,7 +135,15 @@ class MiLBScraper:
             raise RuntimeError("Playwright is not installed in this environment")
 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+            try:
+                browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+            except Exception as e:
+                err = str(e).lower()
+                if "executable doesn't exist" in err or "browserType.launch" in err:
+                    raise RuntimeError(
+                        "Playwright browser binaries are missing. Install with: python -m playwright install chromium"
+                    ) from e
+                raise
             context = browser.new_context(user_agent=self.user_agent, locale="en-US")
             page = context.new_page()
             # set extra headers similar to session
@@ -175,6 +184,47 @@ class MiLBScraper:
             except Exception:
                 pass
             return content
+
+    def search_bbref_register_pages(self, name: str, max_results: int = 15) -> List[Dict[str, Any]]:
+        """Search Baseball-Reference for MiLB register player pages matching ``name``.
+
+        Returns rows with ``url``, ``bbref_id``, and ``label`` (anchor text when available).
+        """
+        q = quote_plus(name.strip())
+        search_url = f"https://www.baseball-reference.com/search/search.fcgi?search={q}"
+        html = self.fetch(search_url)
+        soup = BeautifulSoup(html, "html.parser")
+        base = "https://www.baseball-reference.com"
+        seen: set[str] = set()
+        out: List[Dict[str, Any]] = []
+
+        def push(href: str, label: str) -> None:
+            if not href or "register/player.fcgi" not in href:
+                return
+            full = urljoin(base, href)
+            m = re.search(r"[?&]id=([^&]+)", full)
+            if not m:
+                return
+            bid = unquote(m.group(1))
+            if bid in seen:
+                return
+            seen.add(bid)
+            out.append(
+                {
+                    "url": full.split("#")[0],
+                    "bbref_id": bid,
+                    "label": label.strip() or bid,
+                }
+            )
+
+        for a in soup.select('a[href*="register/player.fcgi"]'):
+            push(a.get("href") or "", a.get_text(" ", strip=True) or "")
+
+        if not out:
+            for m in re.finditer(r'href="([^"]*register/player\.fcgi[^"]*)"', html, re.I):
+                push(m.group(1), "")
+
+        return out[:max_results]
 
     def _extract_comment_tables(self, soup: BeautifulSoup) -> List[BeautifulSoup]:
         tables = []

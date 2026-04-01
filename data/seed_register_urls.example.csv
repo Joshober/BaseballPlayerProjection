@@ -1,0 +1,4 @@
+# Copy to seed_register_urls.csv and fill in real BBRef register URLs.
+# Optional mlb_id avoids name-search ambiguity; omit to resolve via search_mlb_people + birth year match.
+# register_url,mlb_id,notes
+# https://www.baseball-reference.com/register/player.fcgi?id=troutmi01,545361,Mike Trout example
