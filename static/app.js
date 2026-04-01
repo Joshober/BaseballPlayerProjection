@@ -64,6 +64,25 @@ async function runScrapeFromForm() {
   }
 }
 
+function toSearchTable(rows) {
+  if (!rows || rows.length === 0) return "<div style='padding:10px;color:#8fa3c0;'>No data</div>";
+  const cols = Object.keys(rows[0]);
+  const thead = `<thead><tr>${cols.map((c) => `<th>${c}</th>`).join("")}</tr></thead>`;
+  const bodyRows = rows
+    .map((r) => `<tr>${cols.map((c) => {
+      if (c === "id") return `<td><button class="link-btn" onclick="loadPlayer(${r[c]})">${r[c]}</button></td>`;
+      return `<td>${r[c] ?? ""}</td>`;
+    }).join("")}</tr>`)
+    .join("");
+  return `<table>${thead}<tbody>${bodyRows}</tbody></table>`;
+}
+
+async function loadPlayer(id) {
+  document.getElementById("player-id").value = id;
+  document.getElementById("player-form").dispatchEvent(new Event("submit"));
+  document.getElementById("player-form").scrollIntoView({ behavior: "smooth" });
+}
+
 document.getElementById("search-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = document.getElementById("search-name").value.trim();
@@ -73,7 +92,7 @@ document.getElementById("search-form").addEventListener("submit", async (e) => {
     const res = await fetch(`/mlb/search?name=${encodeURIComponent(name)}`);
     const data = await parseApiResponse(res);
     if (!res.ok) throw new Error(data.detail || "Request failed");
-    document.getElementById("search-results").innerHTML = toTable(data.results || []);
+    document.getElementById("search-results").innerHTML = toSearchTable(data.results || []);
     setStatus("search-status", `Found ${data.count} result(s).`, "ok");
   } catch (err) {
     setStatus("search-status", `Error: ${err.message}`, "error");
