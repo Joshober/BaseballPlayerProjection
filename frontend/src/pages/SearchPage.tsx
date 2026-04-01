@@ -77,7 +77,18 @@ export default function SearchPage() {
                     <tr key={`${rid ?? i}-${i}`} className="border-b border-white/5 hover:bg-white/5">
                       <td className="px-2 py-2 text-scout-chalk/90">{row.full_name ?? ""}</td>
                       <td className="px-2 py-2 whitespace-nowrap text-scout-chalk/90">{row.primary_position ?? ""}</td>
-                      <td className="px-2 py-2 whitespace-nowrap text-scout-chalk/90">{rid ?? ""}</td>
+                      <td className="px-2 py-2 whitespace-nowrap text-scout-chalk/90">
+                        {rid != null && Number.isFinite(Number(rid)) ? (
+                          <Link
+                            to={`/player/${rid}`}
+                            className="text-scout-clay underline-offset-2 hover:underline"
+                          >
+                            {rid}
+                          </Link>
+                        ) : (
+                          (rid ?? "")
+                        )}
+                      </td>
                       <td className="px-2 py-2 whitespace-nowrap text-scout-chalk/90">{String(row.active ?? "")}</td>
                       <td className="px-2 py-2">
                         {rid != null && Number.isFinite(Number(rid)) ? (

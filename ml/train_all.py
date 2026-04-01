@@ -20,6 +20,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from db.config import load_project_env
+from ml.arrival_training import default_feature_list, train_arrival_by_role
 from ml.validation_splits import (
     fetch_first_milb_season_by_player,
     temporal_test_mask,
@@ -32,22 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "data" / "models"
 MODELS.mkdir(parents=True, exist_ok=True)
 
-# Top feature set for arrival (v2 + key v1 aggregates); align with ml/explore_promotion.py
-DEFAULT_ARRIVAL_FEATURES: list[str] = [
-    "career_age_vs_level_avg",
-    "career_milb_bb_pct",
-    "career_milb_k_pct",
-    "career_milb_iso",
-    "promotion_speed_score",
-    "ever_repeated_level",
-    "ops_yoy_delta",
-    "ops_trajectory",
-    "seasons_in_minors",
-    "peak_level_order",
-    "age_at_pro_debut",
-    "draft_round_feat",
-    "low_sample_season_flag",
-]
+# Re-export for scripts that import train_all.DEFAULT_ARRIVAL_FEATURES
+DEFAULT_ARRIVAL_FEATURES = default_feature_list("v2")
 
 
 def _fetch_features(conn: psycopg.Connection, feature_version: str) -> pd.DataFrame:
@@ -291,12 +278,17 @@ def train_timeline(df: pd.DataFrame) -> dict[str, float]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train ScoutPro arrival models (LR + XGB)")
-    parser.add_argument("--feature-version", default="v2")
+    parser = argparse.ArgumentParser(description="Train ScoutPro arrival models (split hitters/pitchers + calibration)")
+    parser.add_argument("--feature-version", default="v3")
     parser.add_argument(
         "--features",
         default=None,
-        help="Comma-separated feature columns (default: built-in list)",
+        help="Comma-separated feature columns (default: v2/v3 built-in list)",
+    )
+    parser.add_argument(
+        "--legacy-single-model",
+        action="store_true",
+        help="Train single pooled LR+XGB only (old behavior)",
     )
     args = parser.parse_args()
 
@@ -305,17 +297,27 @@ def main() -> None:
         print("DATABASE_URL not set; training skipped")
         return
 
-    feat_cols = [x.strip() for x in args.features.split(",")] if args.features else list(DEFAULT_ARRIVAL_FEATURES)
+    feat_cols = (
+        [x.strip() for x in args.features.split(",")]
+        if args.features
+        else default_feature_list(args.feature_version)
+    )
 
     with psycopg.connect(database_url) as conn:
         df = _fetch_features(conn, args.feature_version)
         temporal = evaluate_temporal(df, feat_cols, conn)
         groups = evaluate_by_group(df, feat_cols)
-
-    print("rows:", len(df))
-    arr = train_arrival(df, feat_cols)
+        print("rows:", len(df))
+        if args.legacy_single_model:
+            arr = train_arrival(df, feat_cols)
+            print("arrival (legacy):", arr)
+        else:
+            arr = train_arrival_by_role(df, feat_cols, args.feature_version, conn=conn)
+            print(
+                "arrival_by_role:",
+                json.dumps({k: v for k, v in arr.items() if k != "manifest_path"}, default=str),
+            )
     tl = train_timeline(df)
-    print("arrival:", arr)
     print("timeline:", tl)
     print("temporal_validation:", temporal)
     print("subgroup_auc:", groups)

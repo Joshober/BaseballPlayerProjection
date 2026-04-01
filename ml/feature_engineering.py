@@ -8,6 +8,7 @@ import pandas as pd
 import psycopg
 
 from db.config import load_project_env
+from ml.cutoff_policy import format_policy
 
 load_project_env()
 
@@ -158,10 +159,76 @@ def _low_sample_flag(b: pd.DataFrame, pit: pd.DataFrame, position_group: str) ->
     return mx < 200.0
 
 
+def _annotate_ops_age_percentiles(batting: pd.DataFrame) -> pd.DataFrame:
+    """Within (season, level_order), OPS/age percentile among all MiLB batting rows."""
+    if batting.empty:
+        return batting
+    out = batting.copy()
+    if "ops" in out.columns:
+        out["ops_pctile_row"] = out.groupby(["season", "level_order"])["ops"].rank(pct=True, ascending=True)
+    else:
+        out["ops_pctile_row"] = np.nan
+    if "age" in out.columns:
+        out["age_pctile_row"] = out.groupby(["season", "level_order"])["age"].rank(pct=True, ascending=True)
+    else:
+        out["age_pctile_row"] = np.nan
+    return out
+
+
+def _annotate_pitching_percentiles(pitching: pd.DataFrame) -> pd.DataFrame:
+    """Within (season, level_order), ERA percentile (higher = better) and age percentile."""
+    if pitching.empty:
+        return pitching
+    out = pitching.copy()
+    if "era" in out.columns:
+        out["era_pctile_row"] = 1.0 - out.groupby(["season", "level_order"])["era"].rank(pct=True, ascending=True)
+    else:
+        out["era_pctile_row"] = np.nan
+    if "age" in out.columns:
+        out["age_pctile_row"] = out.groupby(["season", "level_order"])["age"].rank(pct=True, ascending=True)
+    else:
+        out["age_pctile_row"] = np.nan
+    return out
+
+
+def _apply_first_k_milb_seasons(
+    b: pd.DataFrame, pit: pd.DataFrame, k: int
+) -> tuple[pd.DataFrame, pd.DataFrame, int | None, str]:
+    """Keep only rows from the first K distinct MiLB seasons (by calendar year)."""
+    policy = format_policy(k)
+    seasons: set[int] = set()
+    if not b.empty:
+        seasons |= set(b["season"].dropna().astype(int).unique())
+    if not pit.empty:
+        seasons |= set(pit["season"].dropna().astype(int).unique())
+    if not seasons:
+        return b, pit, None, policy
+    ordered = sorted(seasons)
+    allowed = set(ordered[: min(k, len(ordered))])
+    cutoff = max(allowed) if allowed else None
+    bb = b[b["season"].isin(allowed)].copy() if not b.empty else b
+    pp = pit[pit["season"].isin(allowed)].copy() if not pit.empty else pit
+    return bb, pp, cutoff, policy
+
+
+def _weighted_pctile_mean(frame: pd.DataFrame, pct_col: str, weight_col: str) -> float | None:
+    if frame.empty or pct_col not in frame.columns:
+        return None
+    w = frame[weight_col].fillna(0).astype(float)
+    p = frame[pct_col].astype(float)
+    if w.sum() <= 0 or p.notna().sum() == 0:
+        return None
+    m = p.notna()
+    if not m.any():
+        return None
+    return float((p[m] * w[m]).sum() / w[m].sum())
+
+
 def build_features_dataframe(
     conn: psycopg.Connection,
     feature_version: str = "v1",
     cohort_player_ids: set[int] | None = None,
+    first_k_milb_seasons: int | None = None,
 ) -> pd.DataFrame:
     try:
         players = _fetch_df(
@@ -207,6 +274,11 @@ def build_features_dataframe(
 
     cohort = _cohort_mean_age(batting, pitching, cohort_player_ids)
 
+    use_cutoff = first_k_milb_seasons is not None and first_k_milb_seasons > 0
+    if use_cutoff:
+        batting = _annotate_ops_age_percentiles(batting)
+        pitching = _annotate_pitching_percentiles(pitching)
+
     out_rows: list[dict[str, Any]] = []
 
     batting_group = batting.groupby("player_id") if not batting.empty else None
@@ -224,6 +296,22 @@ def build_features_dataframe(
             if pitching_group is not None and player_id in pitching_group.groups
             else pd.DataFrame()
         )
+
+        prediction_cutoff_season = None
+        cutoff_policy_val = None
+        ops_pctile_w = None
+        era_pctile_w = None
+        age_pctile_w = None
+        if use_cutoff and first_k_milb_seasons is not None:
+            b, pit, prediction_cutoff_season, cutoff_policy_val = _apply_first_k_milb_seasons(
+                b, pit, first_k_milb_seasons
+            )
+            ops_pctile_w = _weighted_pctile_mean(b, "ops_pctile_row", "pa")
+            era_pctile_w = _weighted_pctile_mean(pit, "era_pctile_row", "ip")
+            if not b.empty:
+                age_pctile_w = _weighted_pctile_mean(b, "age_pctile_row", "pa")
+            if age_pctile_w is None and not pit.empty:
+                age_pctile_w = _weighted_pctile_mean(pit, "age_pctile_row", "ip")
 
         all_levels = []
         if not b.empty:
@@ -312,7 +400,7 @@ def build_features_dataframe(
                 position_group = "rp"
 
         first_milb = int(lvl["season"].min()) if not lvl.empty and lvl["season"].notna().any() else None
-        v2_on = feature_version == "v2"
+        v2_on = feature_version != "v1"
         career_age_vs = None
         ev_rep = None
         promo_speed = None
@@ -414,6 +502,11 @@ def build_features_dataframe(
             "is_international_feat": intl_f,
             "signing_bonus_usd_feat": bonus_f,
             "label_eligible_for_training": elig_bool,
+            "prediction_cutoff_season": prediction_cutoff_season,
+            "cutoff_policy": cutoff_policy_val,
+            "ops_pctile_milb_weighted": ops_pctile_w,
+            "era_pctile_milb_weighted": era_pctile_w,
+            "age_pctile_milb_weighted": age_pctile_w,
         }
         out_rows.append(row_base)
 
@@ -471,6 +564,11 @@ def upsert_engineered_features(conn: psycopg.Connection, frame: pd.DataFrame) ->
         "is_international_feat",
         "signing_bonus_usd_feat",
         "label_eligible_for_training",
+        "prediction_cutoff_season",
+        "cutoff_policy",
+        "ops_pctile_milb_weighted",
+        "era_pctile_milb_weighted",
+        "age_pctile_milb_weighted",
     ]
     set_cols = [c for c in cols if c not in ("player_id", "feature_version")]
     updates = ", ".join([f"{c}=EXCLUDED.{c}" for c in set_cols] + ["computed_at=NOW()"])
@@ -493,12 +591,14 @@ def build_and_upsert_features(
     database_url: str,
     feature_version: str = "v1",
     cohort_player_ids: set[int] | None = None,
+    first_k_milb_seasons: int | None = None,
 ) -> FeatureBuildResult:
     with psycopg.connect(database_url) as conn:
         frame = build_features_dataframe(
             conn,
             feature_version=feature_version,
             cohort_player_ids=cohort_player_ids,
+            first_k_milb_seasons=first_k_milb_seasons,
         )
         upserted = upsert_engineered_features(conn, frame)
     return FeatureBuildResult(feature_version=feature_version, built_rows=len(frame), upserted_rows=upserted)
