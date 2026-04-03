@@ -17,7 +17,17 @@ from free_apis import get_mlb_player, search_mlb_people
 from ml.feature_router import router as feature_router
 from ml.ingest_router import router as ingest_router
 
-from backend.api.routes import comparisons, health as health_routes, players, predictions, reports, scrape, subscriptions, watchlist
+from backend.api.routes import (
+    comparisons,
+    data_science,
+    health as health_routes,
+    players,
+    predictions,
+    reports,
+    scrape,
+    subscriptions,
+    watchlist,
+)
 from backend.api.services.scrape_integration import preview_response
 
 _sentry_dsn = os.getenv("SENTRY_DSN", "").strip()
@@ -54,6 +64,7 @@ app.include_router(reports.router, prefix="/api")
 app.include_router(subscriptions.router, prefix="/api")
 app.include_router(watchlist.router, prefix="/api")
 app.include_router(players.router, prefix="/api")
+app.include_router(data_science.router, prefix="/api")
 app.include_router(scrape.router, prefix="/api")
 
 

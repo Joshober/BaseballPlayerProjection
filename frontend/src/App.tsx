@@ -7,6 +7,8 @@ import ToolsPage from "./pages/ToolsPage";
 import DashboardPage from "./pages/DashboardPage";
 import PlayerPage from "./pages/PlayerPage";
 import PricingPage from "./pages/PricingPage";
+import DataModelsPage from "./pages/DataModelsPage";
+import ComparePage from "./pages/ComparePage";
 import { ClerkSignIn, ClerkSignUp } from "./pages/ClerkAuthPages";
 import { clerkEnabled } from "./lib/clerk";
 
@@ -53,6 +55,8 @@ export default function App() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/search" element={<SearchPage />} />
         <Route path="/tools" element={<ToolsPage />} />
+        <Route path="/data-models" element={<DataModelsPage />} />
+        <Route path="/compare" element={<ComparePage />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route
           path="/dashboard"

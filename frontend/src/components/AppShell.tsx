@@ -29,6 +29,12 @@ export default function AppShell({ children }: Props) {
             <Link className="text-scout-chalk/60 hover:text-scout-chalk" to="/tools">
               Data tools
             </Link>
+            <Link className="text-scout-chalk/60 hover:text-scout-chalk" to="/data-models">
+              Data &amp; models
+            </Link>
+            <Link className="text-scout-chalk/60 hover:text-scout-chalk" to="/compare">
+              Compare
+            </Link>
             {clerkOn ? (
               <>
                 <SignedOut>

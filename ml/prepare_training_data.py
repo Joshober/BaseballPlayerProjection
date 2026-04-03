@@ -19,7 +19,7 @@ def main() -> None:
     parser.add_argument("--skip-labels", action="store_true", help="Skip MLB API label backfill")
     parser.add_argument("--label-limit", type=int, default=None, help="Pass --limit to backfill_player_labels")
     parser.add_argument("--skip-features", action="store_true", help="Skip engineered_features build")
-    parser.add_argument("--feature-version", default="v2")
+    parser.add_argument("--feature-version", default="v3")
     parser.add_argument("--train", action="store_true", help="Run ml.train_all after feature build")
     args = parser.parse_args()
 

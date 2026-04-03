@@ -20,7 +20,7 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from db.config import load_project_env
-from ml.arrival_training import default_feature_list, train_arrival_by_role
+from ml.arrival_training import default_feature_list, train_arrival_by_role, training_subset
 from ml.validation_splits import (
     fetch_first_milb_season_by_player,
     temporal_test_mask,
@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MODELS = ROOT / "data" / "models"
 MODELS.mkdir(parents=True, exist_ok=True)
 
-# Re-export for scripts that import train_all.DEFAULT_ARRIVAL_FEATURES
+# Re-export for scripts that import train_all.DEFAULT_ARRIVAL_FEATURES (v2 column set)
 DEFAULT_ARRIVAL_FEATURES = default_feature_list("v2")
 
 
@@ -79,10 +79,7 @@ def train_arrival(
     *,
     random_state: int = 42,
 ) -> dict[str, Any]:
-    if "label_eligible_for_training" in df.columns:
-        sub = df[df["label_eligible_for_training"].fillna(True).eq(True)]
-    else:
-        sub = df
+    sub = training_subset(df)
     if len(sub) < 30:
         return {"auc_lr": float("nan"), "auc_xgb": float("nan"), "note": "insufficient rows"}
 
@@ -158,10 +155,10 @@ def evaluate_temporal(
     d = df.copy()
     tr = temporal_train_mask(d, fs, train_before_year=train_before)
     te = temporal_test_mask(d, fs, test_start_year=test_start, test_end_year=test_end)
-    if "label_eligible_for_training" in d.columns:
-        ok = d["label_eligible_for_training"].fillna(True).eq(True)
-        tr = tr & ok
-        te = te & ok
+    ts = training_subset(d)
+    ok_idx = ts.index
+    tr = tr & d.index.isin(ok_idx)
+    te = te & d.index.isin(ok_idx)
     sub_tr = d[tr]
     sub_te = d[te]
     if len(sub_te) < 10 or sub_tr["label_reached_mlb"].sum() < 3:
@@ -192,10 +189,7 @@ def evaluate_temporal(
 
 def evaluate_by_group(df: pd.DataFrame, feat_cols: list[str]) -> dict[str, float]:
     out: dict[str, float] = {}
-    if "label_eligible_for_training" in df.columns:
-        base = df[df["label_eligible_for_training"].fillna(True).eq(True)]
-    else:
-        base = df
+    base = training_subset(df)
     for g in ("bat", "sp", "rp"):
         sub = base[base["position_group"].eq(g)]
         X, y, use_cols = _prepare_matrix(sub, feat_cols)

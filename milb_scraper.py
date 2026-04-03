@@ -272,16 +272,28 @@ class MiLBScraper:
                     continue
 
             ident_low = identifier.lower()
-            if any(k in ident_low for k in ("batting", "bat", "batters", "batter", "pa", "rbi", "hr", "avg", "obp", "slg")):
-                batting_dfs.append(_clean_dataframe(df))
-            elif any(k in ident_low for k in ("pitching", "pitch", "pitchers", "era", "ip", "so", "bb", "era+")):
+            headers = ",".join([c.lower() for c in df.columns.astype(str)])
+            # Header text includes HR/BB/SO for both batting and pitching — do not key off those alone.
+            has_pitch_cols = "era" in headers or "inn" in headers or (
+                "ip" in headers and ("er" in headers or "w" in headers or "gs" in headers)
+            )
+            has_bat_cols = ("pa" in headers or "ab" in headers) and (
+                "avg" in headers or "obp" in headers or "slg" in headers or "ops" in headers
+            )
+            if has_pitch_cols and not has_bat_cols:
                 pitching_dfs.append(_clean_dataframe(df))
+            elif has_bat_cols and not has_pitch_cols:
+                batting_dfs.append(_clean_dataframe(df))
+            elif any(k in ident_low for k in ("pitching", "pitch", "pitchers", "standard pitching")):
+                pitching_dfs.append(_clean_dataframe(df))
+            elif any(k in ident_low for k in ("batting", "bat", "batters", "batter", "standard batting")):
+                batting_dfs.append(_clean_dataframe(df))
+            elif any(k in ident_low for k in ("rbi", "obp", "slg")) and "era" not in headers:
+                batting_dfs.append(_clean_dataframe(df))
             else:
-                # fallback heuristics based on headers
-                headers = ",".join([c.lower() for c in df.columns.astype(str)])
-                if any(h in headers for h in ("era", "ip", "so", "bb")):
+                if any(h in headers for h in ("era", "ip", "inn")) and "avg" not in headers:
                     pitching_dfs.append(_clean_dataframe(df))
-                elif any(h in headers for h in ("rbi", "hr", "pa", "ab", "avg")):
+                elif any(h in headers for h in ("rbi", "pa", "ab", "avg")):
                     batting_dfs.append(_clean_dataframe(df))
 
         return {"batting": batting_dfs, "pitching": pitching_dfs, "soup": soup}

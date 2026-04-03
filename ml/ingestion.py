@@ -111,7 +111,8 @@ def _is_pitching_stats_df(df: pd.DataFrame | None) -> bool:
     cols = {str(c).lower() for c in df.columns}
     if "pa" in cols and "ab" in cols:
         return False
-    if "fld%" in cols:
+    # Register pages often append fielding columns to the pitching table; still pitching if IP/ERA exist.
+    if "fld%" in cols and not ("ip" in cols or "era" in cols or "inn" in cols):
         return False
     if "ch" in cols and "po" in cols and "ip" not in cols and "era" not in cols and "inn" not in cols:
         return False

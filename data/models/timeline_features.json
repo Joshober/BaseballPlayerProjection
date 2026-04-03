@@ -1,0 +1,14 @@
+{
+  "features": [
+    "career_milb_pa",
+    "career_milb_iso",
+    "career_milb_bb_pct",
+    "career_milb_k_pct",
+    "career_milb_ip",
+    "career_milb_k9",
+    "career_milb_bb9",
+    "career_milb_k_minus_bb",
+    "career_milb_whip"
+  ],
+  "mae": 3.5533110151688256
+}

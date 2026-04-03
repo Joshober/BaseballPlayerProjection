@@ -294,6 +294,13 @@ CREATE TABLE IF NOT EXISTS engineered_features (
     signing_bonus_usd_feat      BIGINT,
     label_eligible_for_training BOOLEAN,
 
+    -- v3: leakage-safe cutoff + cohort percentiles (see ml/cutoff_policy.py)
+    prediction_cutoff_season       SMALLINT,
+    cutoff_policy                  VARCHAR(64),
+    ops_pctile_milb_weighted       NUMERIC(8,5),
+    era_pctile_milb_weighted       NUMERIC(8,5),
+    age_pctile_milb_weighted       NUMERIC(8,5),
+
     UNIQUE (player_id, feature_version)
 );
 

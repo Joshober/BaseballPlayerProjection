@@ -10,7 +10,11 @@ type MlbPlayerPayload = {
 };
 
 type PredPayload = {
-  prediction?: { mlb_probability?: number } | null;
+  prediction?: {
+    mlb_probability?: number | null;
+    insufficient_data?: boolean;
+    note?: string | null;
+  } | null;
 };
 
 type MilbPayload = {
@@ -53,8 +57,14 @@ export default function TrackedPlayerCard({ mlbamId, getToken }: Props) {
     (mlb.data?.profile?.fullName as string | undefined) ||
     `Player ${mlbamId}`;
   const pos = (mlb.data?.profile?.primary_position as string | undefined) || "—";
-  const prob = pred.data?.prediction?.mlb_probability;
-  const probLabel = typeof prob === "number" ? `${Math.round(prob * 100)}% MLB prob.` : "—";
+  const predBundle = pred.data?.prediction;
+  const prob = predBundle?.mlb_probability;
+  const probLabel =
+    predBundle?.insufficient_data || predBundle?.note
+      ? predBundle?.note || "Insufficient MiLB data"
+      : typeof prob === "number"
+        ? `${Math.round(prob * 100)}% MLB prob.`
+        : "—";
 
   const lastBat = mlb.data?.career_hitting?.[0];
   const lastPitch = mlb.data?.career_pitching?.[0];

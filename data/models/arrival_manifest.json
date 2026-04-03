@@ -1,0 +1,77 @@
+{
+  "feature_version": "v3",
+  "roles": {
+    "bat": {
+      "note": null,
+      "algorithm_raw": "logistic_regression",
+      "artifact": "bat_arrival.joblib",
+      "features_used": [
+        "career_age_vs_level_avg",
+        "career_milb_bb_pct",
+        "career_milb_k_pct",
+        "career_milb_iso",
+        "promotion_speed_score",
+        "ever_repeated_level",
+        "ops_yoy_delta",
+        "ops_trajectory",
+        "seasons_in_minors",
+        "peak_level_order",
+        "age_at_pro_debut",
+        "draft_round_feat",
+        "low_sample_season_flag",
+        "ops_pctile_milb_weighted",
+        "era_pctile_milb_weighted",
+        "age_pctile_milb_weighted"
+      ],
+      "metrics_raw": {
+        "roc_auc": 0.6239316239316239,
+        "pr_auc": 0.8164789085276742,
+        "log_loss": 0.7137163577800798,
+        "brier": 0.2497786312120924
+      },
+      "metrics_calibrated": {
+        "roc_auc": 0.49572649572649574,
+        "pr_auc": 0.7782330083804769,
+        "log_loss": 0.5467095453062348,
+        "brier": 0.18010119931317936
+      },
+      "top_importance": []
+    },
+    "pitch": {
+      "note": null,
+      "algorithm_raw": "logistic_regression",
+      "artifact": "pitch_arrival.joblib",
+      "features_used": [
+        "career_age_vs_level_avg",
+        "career_milb_bb_pct",
+        "career_milb_k_pct",
+        "career_milb_iso",
+        "promotion_speed_score",
+        "ever_repeated_level",
+        "ops_yoy_delta",
+        "ops_trajectory",
+        "seasons_in_minors",
+        "peak_level_order",
+        "age_at_pro_debut",
+        "draft_round_feat",
+        "low_sample_season_flag",
+        "ops_pctile_milb_weighted",
+        "era_pctile_milb_weighted",
+        "age_pctile_milb_weighted"
+      ],
+      "metrics_raw": {
+        "roc_auc": 0.875,
+        "pr_auc": 0.8875,
+        "log_loss": 0.5253955786382611,
+        "brier": 0.1799724500350932
+      },
+      "metrics_calibrated": {
+        "roc_auc": 0.3125,
+        "pr_auc": 0.475,
+        "log_loss": 0.7366747232058252,
+        "brier": 0.27159771667883215
+      },
+      "top_importance": []
+    }
+  }
+}

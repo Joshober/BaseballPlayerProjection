@@ -92,7 +92,7 @@ def _weighted_age_vs_cohort(
         return None
     m = frame.merge(cohort, on=["season", "level_order"], how="left")
     m["mean_age"] = m["mean_age"].fillna(m["age"])
-    m["diff"] = m["age"] - m["mean_age"]
+    m["diff"] = pd.to_numeric(m["age"], errors="coerce") - pd.to_numeric(m["mean_age"], errors="coerce")
     w = m[weight_col].fillna(0).astype(float)
     if w.sum() <= 0:
         return None
@@ -116,10 +116,12 @@ def _ops_yoy_delta_and_improve(b: pd.DataFrame) -> tuple[float | None, bool]:
     ops_by_season: list[tuple[int, float]] = []
     for sea in seasons:
         grp = b[b["season"] == sea]
-        pa = float(grp["pa"].fillna(0).sum())
+        pa = float(pd.to_numeric(grp["pa"], errors="coerce").fillna(0).sum())
         if pa <= 0:
             continue
-        wops = float((grp["ops"].fillna(0) * grp["pa"].fillna(0)).sum() / pa)
+        ops_f = pd.to_numeric(grp["ops"], errors="coerce").fillna(0)
+        pa_f = pd.to_numeric(grp["pa"], errors="coerce").fillna(0)
+        wops = float((ops_f * pa_f).sum() / pa)
         ops_by_season.append((int(sea), wops))
     if len(ops_by_season) < 2:
         return None, False
@@ -135,16 +137,45 @@ def _kbb_yoy_delta_and_improve(pit: pd.DataFrame) -> tuple[float | None, bool]:
     vals: list[tuple[int, float]] = []
     for sea in seasons:
         grp = pit[pit["season"] == sea]
-        bf = grp["ip"].fillna(0).sum()  # proxy weight if BF missing
+        bf = float(pd.to_numeric(grp["ip"], errors="coerce").fillna(0).sum())
         if bf <= 0:
             continue
-        w = float((grp["k_minus_bb"].fillna(0) * grp["ip"].fillna(0)).sum() / bf)
+        km = pd.to_numeric(grp["k_minus_bb"], errors="coerce").fillna(0)
+        ip_f = pd.to_numeric(grp["ip"], errors="coerce").fillna(0)
+        w = float((km * ip_f).sum() / bf)
         vals.append((int(sea), w))
     if len(vals) < 2:
         return None, False
     last, prev = vals[-1][1], vals[-2][1]
     delta = last - prev
     return delta, delta > 0
+
+
+def _sp_or_rp_from_pit(pit: pd.DataFrame) -> str:
+    """Starter vs reliever from MiLB pitching lines (uses g/gs when available)."""
+    if pit.empty:
+        return "rp"
+    g_tot = float(pd.to_numeric(pit.get("g"), errors="coerce").fillna(0).sum())
+    gs_tot = float(pd.to_numeric(pit.get("gs"), errors="coerce").fillna(0).sum())
+    if g_tot > 0 and gs_tot / g_tot >= 0.35:
+        return "sp"
+    return "rp"
+
+
+def _infer_position_group(pos_raw: object, b: pd.DataFrame, pit: pd.DataFrame) -> str:
+    """bat | sp | rp — uses players.position when set; else IP vs PA workload."""
+    if pos_raw is not None and not (isinstance(pos_raw, float) and pd.isna(pos_raw)):
+        pos = str(pos_raw).upper().strip()
+        if pos == "P" or "PITCHER" in pos:
+            return _sp_or_rp_from_pit(pit)
+    pa_sum = float(b["pa"].fillna(0).sum()) if not b.empty else 0.0
+    ip_sum = float(pit["ip"].fillna(0).sum()) if not pit.empty else 0.0
+    # Pitchers often have large MiLB PA totals from hitting lines; compare workload vs pure hitters (0 IP).
+    if ip_sum >= 20.0:
+        denom = ip_sum + pa_sum * 0.22
+        if denom > 0 and (ip_sum / denom) >= 0.52:
+            return _sp_or_rp_from_pit(pit)
+    return "bat"
 
 
 def _low_sample_flag(b: pd.DataFrame, pit: pd.DataFrame, position_group: str) -> bool:
@@ -240,6 +271,7 @@ def build_features_dataframe(
             """,
         )
     except Exception:
+        conn.rollback()
         players = _fetch_df(
             conn,
             """
@@ -264,7 +296,7 @@ def build_features_dataframe(
         conn,
         """
         SELECT
-            player_id, season, level, level_order, age, gs, ip, era, so9, bb9, k_minus_bb, whip, level_adj_era
+            player_id, season, level, level_order, age, g, gs, ip, era, so9, bb9, k_minus_bb, whip, level_adj_era
         FROM milb_pitching
         """,
     )
@@ -296,6 +328,9 @@ def build_features_dataframe(
             if pitching_group is not None and player_id in pitching_group.groups
             else pd.DataFrame()
         )
+        # Role (bat vs sp/rp) must reflect full MiLB career; first-K cutoff can drop all pitching rows.
+        b_for_role = b
+        pit_for_role = pit
 
         prediction_cutoff_season = None
         cutoff_policy_val = None
@@ -391,13 +426,7 @@ def build_features_dataframe(
         label_peak_salary_usd = int(salary_slice.max()) if not salary_slice.empty else None
         label_career_earnings_usd = int(salary_slice.sum()) if not salary_slice.empty else None
 
-        position_group = "bat"
-        pos = str(p["position"]).upper() if p["position"] is not None else ""
-        if pos == "P":
-            if not pit.empty and pit["gs"].fillna(0).sum() >= 0.35 * max(len(pit), 1):
-                position_group = "sp"
-            else:
-                position_group = "rp"
+        position_group = _infer_position_group(p.get("position"), b_for_role, pit_for_role)
 
         first_milb = int(lvl["season"].min()) if not lvl.empty and lvl["season"].notna().any() else None
         v2_on = feature_version != "v1"

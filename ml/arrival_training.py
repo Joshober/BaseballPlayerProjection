@@ -52,10 +52,25 @@ def default_feature_list(feature_version: str) -> list[str]:
     return list(DEFAULT_FEATURES_V2)
 
 
+def training_subset(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows for arrival training: all negatives (reached_mlb=False); positives only if eligible.
+
+    Negatives marked ineligible are usually active prospects under 28 — still useful for
+    class balance; positives must stay eligible so we do not treat unresolved MLB outcomes
+    as certain.
+    """
+    if "label_reached_mlb" not in df.columns:
+        return df
+    reached = df["label_reached_mlb"].fillna(False).astype(bool)
+    if "label_eligible_for_training" not in df.columns:
+        return df
+    elig = df["label_eligible_for_training"].fillna(True).astype(bool)
+    keep = (~reached) | (reached & elig)
+    return df[keep]
+
+
 def _eligible(df: pd.DataFrame) -> pd.DataFrame:
-    if "label_eligible_for_training" in df.columns:
-        return df[df["label_eligible_for_training"].fillna(True).eq(True)]
-    return df
+    return training_subset(df)
 
 
 def _prepare_matrix(
@@ -153,7 +168,7 @@ def train_one_role(
         min_samples_leaf=3,
         class_weight="balanced_subsample",
         random_state=random_state,
-        n_jobs=-1,
+        n_jobs=1,
     )
     rf.fit(X_train, y_train)
     proba_rf = rf.predict_proba(X_test)[:, 1]
@@ -178,10 +193,14 @@ def train_one_role(
         key=lambda t: _composite(t[2]["roc_auc"], t[2]["brier"]),
     )
 
-    n_splits = min(5, max(2, len(y_train) // 8))
+    n_train = len(y_train)
+    n_splits = min(5, max(2, n_train // 10))
+    n_splits = min(n_splits, n_train)
+    if n_splits < 2:
+        n_splits = 2
     cal = CalibratedClassifierCV(
         clone(best_est),
-        method="isotonic",
+        method="sigmoid",
         cv=n_splits,
     )
     cal.fit(X_train, y_train)

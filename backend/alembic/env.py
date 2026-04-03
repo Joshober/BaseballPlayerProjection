@@ -6,7 +6,7 @@ from pathlib import Path
 
 from alembic import context
 from dotenv import load_dotenv
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 # Repo root = backend/alembic/env.py -> parents[2]
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,9 +45,12 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    section = config.get_section(config.config_ini_section) or {}
-    section["sqlalchemy.url"] = get_url()
-    connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
+    url = get_url()
+    connectable = create_engine(
+        url,
+        poolclass=pool.NullPool,
+        connect_args={"connect_timeout": 15},
+    )
 
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)

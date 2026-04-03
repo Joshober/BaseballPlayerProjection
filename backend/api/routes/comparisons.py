@@ -1,6 +1,7 @@
 """Player comparison endpoints."""
 from __future__ import annotations
 
+import json
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -34,4 +35,13 @@ def get_comparisons(mlbam_id: int, _user: dict = Depends(require_auth)):
     if not row:
         return {"mlbam_id": mlbam_id, "comps": [], "note": "No comparison row; check predictions.similar_player_ids or run comparison engine"}
     rec = dict(zip(cols, row))
-    return {"mlbam_id": mlbam_id, "row": rec}
+    cj = rec.get("comp_json")
+    if isinstance(cj, str):
+        try:
+            cj = json.loads(cj)
+        except json.JSONDecodeError:
+            cj = {}
+    if not isinstance(cj, dict):
+        cj = {}
+    comps_list = cj.get("comps") or []
+    return {"mlbam_id": mlbam_id, "row": rec, "comps": comps_list}

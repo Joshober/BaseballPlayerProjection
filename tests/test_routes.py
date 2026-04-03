@@ -45,6 +45,8 @@ async def test_milb_stats_requires_db(client: httpx.AsyncClient):
     if not os.getenv("DATABASE_URL"):
         pytest.skip("DATABASE_URL not set")
     r = await client.get("/api/players/660670/milb-stats")
+    if r.status_code == 503:
+        pytest.skip("Database not reachable (start Postgres, e.g. docker compose up -d postgres)")
     assert r.status_code == 200
     body = r.json()
     assert body.get("mlbam_id") == 660670

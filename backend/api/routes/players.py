@@ -27,7 +27,12 @@ def get_milb_stats(mlbam_id: int, _user: dict = Depends(require_auth)):
         raise HTTPException(status_code=503, detail="DATABASE_URL not configured")
     import psycopg
 
-    with psycopg.connect(database_url) as conn:
+    try:
+        conn_ctx = psycopg.connect(database_url, connect_timeout=10)
+    except psycopg.Error as exc:
+        raise HTTPException(status_code=503, detail=f"Database unreachable: {exc}") from exc
+
+    with conn_ctx as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """

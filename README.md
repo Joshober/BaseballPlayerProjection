@@ -125,6 +125,8 @@ Training uses `engineered_features` (`ml/train_all.py`) and needs **many players
    - `python -m ml.data_status`
 5. **Optional one-shot pipeline** (PowerShell): `.\scripts\prepare_ml_data.ps1` (add `--train` to run `ml.train_all` after features). `train_all` expects dozens of rows before metrics are meaningful (`insufficient rows or features` is normal until the dataset grows).
 
+**MiLB→MLB arrival models** (`train_arrival_by_role` in `ml/arrival_training.py`): per role (`bat` vs combined `sp`+`rp`), training needs at least **30** eligible rows after filtering and **5** positives and **5** negatives for a stratified split. Expand `data/batch_search_queries.txt` with pitcher-heavy names so `milb_pitching` fills; pure MLB name search skews toward big-leaguers, so long-term you may need **BBRef-only minor careers** (or an explicit negative URL list) to improve negative-class balance.
+
 Offline labels from Lahman CSVs: `python -m ml.build_labels_csv` (writes `data/processed/labels.csv` when `data/raw/lahman/People.csv` is present).
 
 ## Phase 1.5 ingest (scrape → DB)

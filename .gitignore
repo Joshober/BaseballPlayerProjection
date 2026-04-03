@@ -10,3 +10,7 @@ data/processed/*.parquet
 .pytest_cache/
 .mypy_cache/
 *.pyc
+
+# MiLB collection pipeline (regenerates on each run; keep scripts, ignore local state)
+collect_pipeline.log
+collect_progress.csv

@@ -2,15 +2,26 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
+import pandas as pd
 import psycopg
+from psycopg.rows import dict_row
 
 from db.config import load_project_env
+from ml.comparison_engine import (
+    top_similar_with_drivers,
+    V3_ARRIVAL_FEATURE_WEIGHTS,
+    V3_ARRIVAL_FEATURES,
+)
+
+logger = logging.getLogger(__name__)
 
 load_project_env()
 
@@ -59,8 +70,18 @@ def _feature_list_for_role(role: str) -> list[str]:
 
 
 def models_loaded() -> bool:
-    p = MODELS / "arrival_manifest.json"
-    return p.is_file() and (MODELS / "bat_arrival.joblib").is_file()
+    """True when arrival_manifest.json exists and every role artifact file is on disk."""
+    m = _load_manifest()
+    if not m:
+        return False
+    for role in ("bat", "pitch"):
+        r = (m.get("roles") or {}).get(role) or {}
+        art = r.get("artifact")
+        if not art:
+            return False
+        if not (MODELS / str(art)).is_file():
+            return False
+    return True
 
 
 def _position_to_role(position_group: str | None) -> str:
@@ -70,6 +91,41 @@ def _position_to_role(position_group: str | None) -> str:
     if pg in ("sp", "rp"):
         return "pitch"
     return "bat"
+
+
+def _fetch_knn_corpus(
+    database_url: str,
+    feature_version: str,
+    role: str,
+    exclude_player_id: int,
+    feature_cols: list[str],
+) -> pd.DataFrame:
+    """Rows from engineered_features for same feature_version and role cohort (bat vs pitch)."""
+    allowed = set(V3_ARRIVAL_FEATURES)
+    for c in feature_cols:
+        if c not in allowed:
+            logger.warning("KNN corpus: feature %s not in v3 arrival set, aborting corpus load", c)
+            return pd.DataFrame()
+    meta = "pl.id AS player_id, pl.mlb_id, pl.full_name, ef.position_group"
+    feat_sql = ", ".join(f"ef.{c}" for c in feature_cols)
+    sql = f"""
+        SELECT {meta}, {feat_sql}
+        FROM engineered_features ef
+        JOIN players pl ON pl.id = ef.player_id
+        WHERE ef.feature_version = %s
+          AND pl.id != %s
+          AND (
+            (%s = 'bat' AND (ef.position_group IS NULL OR LOWER(ef.position_group) NOT IN ('sp', 'rp')))
+            OR (%s = 'pitch' AND LOWER(ef.position_group) IN ('sp', 'rp'))
+          )
+    """
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(sql, (feature_version, exclude_player_id, role, role))
+            rows = cur.fetchall()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
 
 
 def generate_full_report(mlbam_id: int) -> dict[str, Any]:
@@ -99,21 +155,33 @@ def generate_full_report(mlbam_id: int) -> dict[str, Any]:
     fv = str(m.get("feature_version") or "v3")
     out["feature_version"] = fv
 
-    with psycopg.connect(database_url) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT ef.* FROM engineered_features ef
-                JOIN players pl ON pl.id = ef.player_id
-                WHERE pl.mlb_id = %s AND ef.feature_version = %s
-                LIMIT 1
-                """,
-                (mlbam_id, fv),
-            )
-            row = cur.fetchone()
-            cols = [d.name for d in cur.description] if cur.description else []
+    row = None
+    cols: list[str] = []
+    tried: list[str] = []
+    for version in (fv, "v3", "v2"):
+        if version in tried:
+            continue
+        tried.append(version)
+        with psycopg.connect(database_url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT ef.* FROM engineered_features ef
+                    JOIN players pl ON pl.id = ef.player_id
+                    WHERE pl.mlb_id = %s AND ef.feature_version = %s
+                    LIMIT 1
+                    """,
+                    (mlbam_id, version),
+                )
+                row = cur.fetchone()
+                cols = [d.name for d in cur.description] if cur.description else []
+        if row:
+            out["feature_version"] = version
+            break
     if not row:
-        out["note"] = f"No engineered_features row for feature_version={fv}; run feature build for this player."
+        out["note"] = (
+            f"No engineered_features row for {mlbam_id} (tried {tried}); run build_features for this player."
+        )
         return out
 
     ef = dict(zip(cols, row))
@@ -142,13 +210,33 @@ def generate_full_report(mlbam_id: int) -> dict[str, Any]:
         out["note"] = f"Scoring error: {exc}"
         return out
 
-    from datetime import datetime, timezone
-
     out["mlb_probability"] = proba
     out["insufficient_data"] = False
     out["model_version"] = f"arrival_{role}_{fv}"
     out["scored_at"] = datetime.now(timezone.utc).isoformat()
     out["top_features"] = []
+    q = pd.Series(ef)
+    try:
+        corpus_df = _fetch_knn_corpus(
+            database_url,
+            str(out["feature_version"]),
+            role,
+            int(ef["player_id"]),
+            feats,
+        )
+        w = {c: V3_ARRIVAL_FEATURE_WEIGHTS.get(c, 1.0) for c in feats}
+        out["similar_players"] = top_similar_with_drivers(
+            q,
+            corpus_df,
+            feats,
+            weights=w,
+            k=5,
+            exclude_player_id=int(ef["player_id"]),
+            driver_top_n=5,
+        )
+    except Exception as exc:
+        logger.warning("Similar players KNN failed for mlbam_id=%s: %s", mlbam_id, exc)
+        out["similar_players"] = []
     return out
 
 
@@ -177,5 +265,32 @@ def store_prediction_stub(mlbam_id: int, bundle: dict[str, Any]) -> None:
                     similar,
                     mlbam_id,
                 ),
+            )
+        conn.commit()
+
+
+def store_comparison_stub(mlbam_id: int, bundle: dict[str, Any]) -> None:
+    """Persist latest similar-player KNN output for GET /comparisons/{mlbam_id}."""
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        return
+    comps = bundle.get("similar_players") or []
+    if not comps:
+        return
+    payload = {
+        "feature_version": bundle.get("feature_version"),
+        "model": "knn_weighted_l2_v3",
+        "comps": comps,
+    }
+    with psycopg.connect(database_url) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO comparisons (player_id, comp_json)
+                SELECT p.id, %s::jsonb
+                FROM players p WHERE p.mlb_id = %s
+                LIMIT 1
+                """,
+                (json.dumps(payload), mlbam_id),
             )
         conn.commit()
